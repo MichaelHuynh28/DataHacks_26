@@ -179,13 +179,12 @@ def _(physics_df):
 
 @app.cell
 def _(mo, np, os, pd, physics_df):
-    # ── CELL 6
+
     SIGHTINGS_FILE = 'sightings.csv'
 
     def load_and_join_sightings(sightings_file, physics_df):
         sightings = pd.read_csv(sightings_file)
         def nearest_sst(slat, slon):
-            # no idea m8 :/
             dists = np.sqrt(
                 (physics_df['LAT'].values - slat)**2 +
                 (physics_df['LON'].values - slon)**2
@@ -217,7 +216,7 @@ def _(mo, np, os, pd, physics_df):
 
 @app.cell
 def _(grad_mag, lat_g, lon_g, mo, np, physics_df, sightings_df, sst_g):
-    # Cell 7
+    # Cell 6
     import matplotlib.pyplot as plt
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
@@ -267,7 +266,7 @@ def _(grad_mag, lat_g, lon_g, mo, np, physics_df, sightings_df, sst_g):
 
     fig = render_map_geo(lon_g, lat_g, sst_g, grad_mag, physics_df, sightings_df)
     mo.mpl.interactive(fig)
-    return ccrs, cfeature, plt
+    return ccrs, cfeature, plt, render_map_geo
 
 
 @app.cell
@@ -349,7 +348,7 @@ def _(garibaldi, leopard, np, pd, physics_df):
     print("Feature importances:")
     for feat, imp in zip(['lat', 'lon', 'month', 'SST'], rf.feature_importances_):
         print(f"  {feat}: {imp:.3f}")
-    return le, rf
+    return get_nearest_sst, le, rf
 
 
 @app.cell
@@ -358,19 +357,19 @@ def _(garibaldi, lat_g, leopard, lon_g, np):
     from scipy.stats import gaussian_kde, linregress
 
     def build_kde(df, lon_g, lat_g):
-        pts    = df[['longitude', 'latitude']].dropna().values.T
-        kde    = gaussian_kde(pts, bw_method=0.08)
+        pts = df[['longitude', 'latitude']].dropna().values.T
+        kde = gaussian_kde(pts, bw_method=0.08)
         coords = np.vstack([lon_g.ravel(), lat_g.ravel()])
         return kde(coords).reshape(lon_g.shape)
 
     def temporal_trend(df):
-        monthly      = df.groupby(['year', 'month']).size().reset_index(name='count')
+        monthly = df.groupby(['year', 'month']).size().reset_index(name='count')
         monthly['t'] = monthly['year'] + (monthly['month'] - 1) / 12
         slope, _, _, p, _ = linregress(monthly['t'], monthly['count'])
         return slope, p, monthly
 
-    gar_kde              = build_kde(garibaldi, lon_g, lat_g)
-    leo_kde              = build_kde(leopard,   lon_g, lat_g)
+    gar_kde = build_kde(garibaldi, lon_g, lat_g)
+    leo_kde = build_kde(leopard,   lon_g, lat_g)
     gar_slope, gar_p, gar_monthly = temporal_trend(garibaldi)
     leo_slope, leo_p, leo_monthly = temporal_trend(leopard)
 
@@ -440,7 +439,7 @@ def _(
                      ha='left', va='bottom')
 
             direction = '↑ Increasing' if slope > 0 else '↓ Decreasing'
-            sig       = '★ significant' if p < 0.05 else 'not significant'
+            sig = '★ significant' if p < 0.05 else 'not significant'
             ax9.set_title(f'{name}\n{direction} trend  ({sig})', color='white', fontsize=12)
             ax9.legend(facecolor='#1a1a2e', labelcolor='white', fontsize=8)
 
@@ -451,7 +450,7 @@ def _(
 
     fig9 = render_species_map()
     mo.mpl.interactive(fig9)
-    return
+    return (render_species_map,)
 
 
 @app.cell
@@ -524,6 +523,7 @@ def _(
     cfeature,
     ci_high,
     ci_low,
+    get_nearest_sst,
     grad_mag,
     lat_g,
     le,
@@ -535,34 +535,46 @@ def _(
     plt,
     rf,
     sst_futures,
+    sst_g,
 ):
-    # Cell 14
     def build_and_render_forecast():
-        def predict_habitat(sst_grid, month):
-            grid_lats   = lat_g.ravel()
-            grid_lons   = lon_g.ravel()
-            grid_sst    = sst_grid.ravel()
+        def predict_habitat(sst_future, month):
+            # Coastal grid centered around actual sighting locations
+            coast_lats = np.linspace(32.5, 33.2, 50)
+            coast_lons = np.linspace(-117.5, -117.0, 50)
+            c_lon_g, c_lat_g = np.meshgrid(coast_lons, coast_lats)
+
+            grid_lats   = c_lat_g.ravel()
+            grid_lons   = c_lon_g.ravel()
             grid_months = np.full_like(grid_lats, month)
-            valid       = ~np.isnan(grid_sst)
-            X_grid      = np.column_stack([grid_lats[valid], grid_lons[valid],
-                                           grid_months[valid], grid_sst[valid]])
+
+            # Get nearest Argo SST for each coastal point then shift by warming delta
+            grid_sst = np.array([get_nearest_sst(la, lo)
+                                  for la, lo in zip(grid_lats, grid_lons)])
+            delta    = np.nanmean(sst_future) - np.nanmean(sst_g)
+            grid_sst = grid_sst + delta
+
+            X_grid  = np.column_stack([grid_lats, grid_lons, grid_months, grid_sst])
             probs   = rf.predict_proba(X_grid)
             gar_idx = list(le.classes_).index('Garibaldi')
             leo_idx = list(le.classes_).index('Leopard Shark')
+
             def to_grid(col):
-                arr        = np.full(grid_lats.shape, np.nan)
-                arr[valid] = probs[:, col]
-                return arr.reshape(lon_g.shape)
-            return to_grid(gar_idx), to_grid(leo_idx)
+                return probs[:, col].reshape(c_lat_g.shape)
+
+            return to_grid(gar_idx), to_grid(leo_idx), c_lon_g, c_lat_g
 
         h_labels = ['Today', '+6 months', '+1 year', '+2 years']
         h_months = [4, 10, 4, 4]
-        gar_maps, leo_maps, sst_maps = [], [], []
+        gar_maps, leo_maps, sst_maps, lon_grids, lat_grids = [], [], [], [], []
+
         for lbl, month in zip(h_labels, h_months):
-            g, l = predict_habitat(sst_futures[lbl]['mid'], month)
+            g, l, c_lon_g, c_lat_g = predict_habitat(sst_futures[lbl]['mid'], month)
             gar_maps.append(g)
             leo_maps.append(l)
             sst_maps.append(sst_futures[lbl]['mid'])
+            lon_grids.append(c_lon_g)
+            lat_grids.append(c_lat_g)
 
         fig_pred, axes14 = plt.subplots(2, 4, figsize=(24, 10),
                                         subplot_kw={'projection': ccrs.PlateCarree()})
@@ -590,11 +602,13 @@ def _(
                              levels=4, colors='white', alpha=0.2, linewidths=0.5,
                              transform=ccrs.PlateCarree())
 
-                # Habitat probability surface
-                ax14.contourf(lon_g, lat_g, prob_g,
+                # Habitat probability surface on coastal grid
+                c_lon_g = lon_grids[col_idx]
+                c_lat_g = lat_grids[col_idx]
+                ax14.contourf(c_lon_g, c_lat_g, prob_g,
                               levels=10, cmap=cm, alpha=0.6, vmin=0, vmax=1,
                               transform=ccrs.PlateCarree())
-                ax14.contour(lon_g, lat_g, prob_g,
+                ax14.contour(c_lon_g, c_lat_g, prob_g,
                              levels=[0.4, 0.6, 0.8], colors=clr,
                              alpha=0.9, linewidths=1.0,
                              transform=ccrs.PlateCarree())
@@ -605,7 +619,7 @@ def _(
                              edgecolors='white', linewidths=0.3,
                              transform=ccrs.PlateCarree())
 
-                # ── Predicted sighting locations ──────────────────────────
+                # Predicted sighting locations on coastal grid
                 n_pred     = 15
                 valid_prob = prob_g.copy()
                 valid_prob[np.isnan(valid_prob)] = 0
@@ -615,8 +629,8 @@ def _(
                         candidates, size=n_pred, replace=False)
                 else:
                     flat_idx = np.argsort(valid_prob.ravel())[-n_pred:]
-                pred_lats  = lat_g.ravel()[flat_idx]
-                pred_lons  = lon_g.ravel()[flat_idx]
+                pred_lats  = c_lat_g.ravel()[flat_idx]
+                pred_lons  = c_lon_g.ravel()[flat_idx]
                 pred_probs = valid_prob.ravel()[flat_idx]
 
                 ax14.scatter(pred_lons, pred_lats,
@@ -663,6 +677,205 @@ def _(
 
     fig_pred = build_and_render_forecast()
     mo.mpl.interactive(fig_pred)
+    return
+
+
+@app.cell
+def _(
+    ccrs,
+    cfeature,
+    get_nearest_sst,
+    grad_mag,
+    lat_g,
+    le,
+    lon_g,
+    np,
+    physics_df,
+    plt,
+    rf,
+    sst_futures,
+    sst_g,
+):
+    import io
+    import base64
+
+    h_labels = ['Today', '+6 months', '+1 year', '+2 years']
+    h_months = [4, 10, 4, 4]
+
+    def compute_and_render(horizon_idx):
+        lbl     = h_labels[horizon_idx]
+        month   = h_months[horizon_idx]
+        coast_lats = np.linspace(32.5, 33.2, 50)
+        coast_lons = np.linspace(-117.5, -117.0, 50)
+        c_lon_g, c_lat_g = np.meshgrid(coast_lons, coast_lats)
+        grid_lats   = c_lat_g.ravel()
+        grid_lons   = c_lon_g.ravel()
+        grid_months = np.full_like(grid_lats, month)
+        grid_sst    = np.array([get_nearest_sst(la, lo)
+                                for la, lo in zip(grid_lats, grid_lons)])
+        delta    = np.nanmean(sst_futures[lbl]['mid']) - np.nanmean(sst_g)
+        grid_sst = grid_sst + delta
+        X_grid   = np.column_stack([grid_lats, grid_lons, grid_months, grid_sst])
+        probs    = rf.predict_proba(X_grid)
+        gar_idx  = list(le.classes_).index('Garibaldi')
+        leo_idx  = list(le.classes_).index('Leopard Shark')
+        gar_prob = probs[:, gar_idx].reshape(c_lat_g.shape)
+        leo_prob = probs[:, leo_idx].reshape(c_lat_g.shape)
+        sst_future = sst_futures[lbl]['mid']
+
+        fig_ui, ax_ui = plt.subplots(figsize=(12, 9),
+                                     subplot_kw={'projection': ccrs.PlateCarree()})
+        fig_ui.patch.set_facecolor('#0a0a1a')
+        ax_ui.set_facecolor('#0a0a1a')
+        ax_ui.set_extent([-120.5, -116.5, 31.0, 34.0], crs=ccrs.PlateCarree())
+
+        ax_ui.pcolormesh(lon_g, lat_g, sst_future,
+                         cmap='RdYlBu_r', shading='auto', alpha=0.6,
+                         transform=ccrs.PlateCarree(), vmin=10, vmax=26)
+        ax_ui.contour(lon_g, lat_g, grad_mag,
+                      levels=4, colors='white', alpha=0.2, linewidths=0.5,
+                      transform=ccrs.PlateCarree())
+        ax_ui.contourf(c_lon_g, c_lat_g, gar_prob,
+                       levels=10, cmap='Oranges', alpha=0.55, vmin=0, vmax=1,
+                       transform=ccrs.PlateCarree())
+        ax_ui.contour(c_lon_g, c_lat_g, gar_prob,
+                      levels=[0.4, 0.6, 0.8], colors='#FF6B35',
+                      alpha=0.9, linewidths=1.2, transform=ccrs.PlateCarree())
+        ax_ui.contourf(c_lon_g, c_lat_g, leo_prob,
+                       levels=10, cmap='Blues', alpha=0.55, vmin=0, vmax=1,
+                       transform=ccrs.PlateCarree())
+        ax_ui.contour(c_lon_g, c_lat_g, leo_prob,
+                      levels=[0.4, 0.6, 0.8], colors='#00F5FF',
+                      alpha=0.9, linewidths=1.2, transform=ccrs.PlateCarree())
+
+        def get_stars(prob_grid, seed):
+            vp    = prob_grid.copy()
+            vp[np.isnan(vp)] = 0
+            cands = np.where(vp.ravel() > 0.2)[0]
+            idx   = np.random.default_rng(seed).choice(cands, size=15, replace=False) \
+                    if len(cands) >= 15 else np.argsort(vp.ravel())[-15:]
+            return c_lon_g.ravel()[idx], c_lat_g.ravel()[idx], vp.ravel()[idx]
+
+        g_lons, g_lats, g_probs = get_stars(gar_prob, 42)
+        l_lons, l_lats, l_probs = get_stars(leo_prob, 99)
+
+        ax_ui.scatter(g_lons, g_lats, c=g_probs, cmap='Oranges',
+                      marker='*', s=180, zorder=8, vmin=0, vmax=1,
+                      edgecolors='#FF6B35', linewidths=0.6,
+                      transform=ccrs.PlateCarree(), label='🟠 Garibaldi predicted')
+        ax_ui.scatter(l_lons, l_lats, c=l_probs, cmap='Blues',
+                      marker='*', s=180, zorder=8, vmin=0, vmax=1,
+                      edgecolors='#00F5FF', linewidths=0.6,
+                      transform=ccrs.PlateCarree(), label='🔵 Leopard Shark predicted')
+        ax_ui.scatter(physics_df['LON'], physics_df['LAT'],
+                      c='cyan', s=30, zorder=6, edgecolors='white', linewidths=0.3,
+                      transform=ccrs.PlateCarree(), label='Argo float')
+
+        ax_ui.add_feature(cfeature.COASTLINE, color='white', linewidth=1.2, zorder=4)
+        ax_ui.add_feature(cfeature.LAND, facecolor='#1a1a2e', zorder=3)
+        ax_ui.add_feature(cfeature.STATES, edgecolor='gray', linewidth=0.5, zorder=4)
+        ax_ui.text(-117.1573, 32.7157, 'San Diego', color='white', fontsize=10,
+                   fontweight='bold', transform=ccrs.PlateCarree(),
+                   ha='left', va='bottom')
+        ax_ui.set_title(
+            f'{lbl}  ·  {np.nanmean(sst_future):.2f}°C mean SST  (+{delta:.3f}°C vs today)',
+            color='white', fontsize=13)
+        ax_ui.legend(facecolor='#1a1a2e', labelcolor='white', fontsize=9, loc='lower left')
+        plt.tight_layout()
+
+        # Save to bytes
+        buf = io.BytesIO()
+        fig_ui.savefig(buf, format='png', dpi=120, bbox_inches='tight',
+                       facecolor='#0a0a1a')
+        plt.close(fig_ui)
+        buf.seek(0)
+        return buf.read()
+
+    # Precompute all 4 — runs once, slider is instant after
+    print("Precomputing forecasts...")
+    forecast_images = [compute_and_render(i) for i in range(4)]
+    print("✅ Done — slider will be instant")
+    return forecast_images, h_labels
+
+
+@app.cell
+def _(mo):
+    timeline = mo.ui.slider(
+        start=0, stop=3, step=1, value=0,
+        label='Time Horizon'
+    )
+    timeline
+    return (timeline,)
+
+
+@app.cell
+def _(
+    ci_high,
+    ci_low,
+    forecast_images,
+    garibaldi,
+    grad_mag,
+    h_labels,
+    lat_g,
+    leopard,
+    lon_g,
+    mo,
+    np,
+    obs_slope,
+    physics_df,
+    render_map_geo,
+    render_species_map,
+    sightings_df,
+    sst_futures,
+    sst_g,
+    timeline,
+):
+    mo.vstack([
+        mo.md("""
+    # 🌊 Safe Harbor
+    ### San Diego Marine Species Habitat Forecast
+    **Michael Lam Huynh & Andres Rodriguez · UCSD · DataHacks 2026**
+
+    ---
+    Using **Argo float oceanographic data** + **iNaturalist species sightings** +
+    **Random Forest ML** to forecast how rising sea surface temperatures will shift
+    the habitat zones of Garibaldi and Leopard Sharks off the San Diego coast.
+    ---
+    """),
+        mo.md(f"""
+    ### 📊 Key Findings
+    | Metric | Value |
+    |--------|-------|
+    | Argo profiles (SD Bight) | {len(physics_df)} |
+    | Garibaldi sightings | {len(garibaldi):,} |
+    | Leopard Shark sightings | {len(leopard):,} |
+    | SST warming trend | {obs_slope:+.4f} °C/year |
+    | 95% Bootstrap CI | [{ci_low:+.4f}, {ci_high:+.4f}] °C/year |
+    | Current mean SST | {np.nanmean(sst_g):.2f} °C |
+    """),
+        mo.md("---"),
+        mo.md("## 🌡️ Sea Surface Temperature · San Diego Bight"),
+        mo.md("*18 Argo float profiles measuring offshore SST. Thermal gradient contours show upwelling fronts.*"),
+        mo.mpl.interactive(render_map_geo(lon_g, lat_g, sst_g, grad_mag, physics_df, sightings_df)),
+        mo.md("---"),
+        mo.md("## 🐟 Species Sighting Hotspots vs SST"),
+        mo.md("*KDE density map of 20 years of iNaturalist sightings overlaid on SST.*"),
+        mo.mpl.interactive(render_species_map()),
+        mo.md("---"),
+        mo.md("## 🔮 Interactive Habitat Shift Forecast"),
+        mo.md(f"*Random Forest trained on (lat, lon, month, SST) — SST projected at {obs_slope:+.4f}°C/year.*"),
+        mo.md("**Drag the slider to move through time →**"),
+        timeline,
+        mo.md(f"### {h_labels[timeline.value]}  —  {np.nanmean(sst_futures[h_labels[timeline.value]]['mid']):.2f}°C mean SST"),
+        mo.image(forecast_images[timeline.value]),
+        mo.md("---"),
+        mo.md("""
+    ### 📚 Data Sources
+    - **Argo GDAC** — EasyOneArgoTSLite float profiles
+    - **iNaturalist** — Garibaldi & Leopard Shark community sightings
+    - **UCSD DataHacks 2026**
+    """),
+    ])
     return
 
 
