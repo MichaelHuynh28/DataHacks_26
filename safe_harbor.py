@@ -185,6 +185,7 @@ def _(mo, np, os, pd, physics_df):
     def load_and_join_sightings(sightings_file, physics_df):
         sightings = pd.read_csv(sightings_file)
         def nearest_sst(slat, slon):
+            # no idea m8 :/
             dists = np.sqrt(
                 (physics_df['LAT'].values - slat)**2 +
                 (physics_df['LON'].values - slon)**2
